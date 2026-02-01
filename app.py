@@ -7,76 +7,85 @@ import numpy as np
 import cv2
 from PIL import Image
 
-st.set_page_config(page_title="Marine Debris Density Mapper", layout="wide")
-st.title("🛰️ Satellite Debris Density & Hotspot Mapper")
+# Set Page Config
+st.set_page_config(page_title="Satellite Debris Precision Mapper", layout="wide")
+st.title("🛰️ Precision Satellite Debris Hotspot Mapper")
 
+# Load Model with SAHI Wrapper
 @st.cache_resource
-def load_sahi_model():
+def load_precision_model():
     return AutoDetectionModel.from_pretrained(
         model_type='yolov8',
         model_path='best.pt',
-        confidence_threshold=0.15, # Lower threshold to catch faint debris
+        confidence_threshold=0.15, # Low threshold for tiny satellite objects
         device='cpu'
     )
 
-model = load_sahi_model()
+model = load_precision_model()
 
-# Sidebar for Density Tuning
-st.sidebar.header("Density Visualization Settings")
-intensity = st.sidebar.slider("Heatmap Intensity", 0.5, 5.0, 2.0)
-blur_radius = st.sidebar.slider("Hotspot Spread (Blur)", 21, 201, 91, step=2)
+# Sidebar Settings
+st.sidebar.header("Precision Settings")
+slice_size = st.sidebar.select_slider("Resolution Level (Slice Size)", options=[416, 640], value=416)
+overlap = st.sidebar.slider("Slice Overlap %", 0.1, 0.5, 0.2)
+heat_blur = st.sidebar.slider("Heatmap Spread", 11, 101, 31, step=2)
 
-uploaded_file = st.file_uploader("Upload Satellite Image", type=["jpg", "jpeg", "png"])
+uploaded_file = st.file_uploader("Upload Satellite Imagery", type=["jpg", "jpeg", "png", "tif"])
 
 if uploaded_file:
+    # 1. Load Image
     image = Image.open(uploaded_file).convert("RGB")
     img_array = np.array(image)
     
-    with st.spinner('Calculating Density Map...'):
-        # 1. Run Sliced Inference for high-res images
+    with st.spinner('Running high-precision sliced inference...'):
+        # 2. Sliced Inference (SAHI)
+        # This prevents 'squashing' large satellite photos
         result = get_sliced_prediction(
             img_array,
             model,
-            slice_height=640,
-            slice_width=640,
-            overlap_height_ratio=0.2
+            slice_height=slice_size,
+            slice_width=slice_size,
+            overlap_height_ratio=overlap,
+            overlap_width_ratio=overlap,
+            postprocess_type="NMS" # Removes duplicate hits in overlaps
         )
         
-        # 2. Build the Density Map (Heatmap)
-        # We create a float32 map to allow for "stacking" heat
+        # 3. Create Point-Based Heatmap
+        # We use a float layer for high-precision density stacking
         heatmap = np.zeros(img_array.shape[:2], dtype=np.float32)
         
         for pred in result.object_prediction_list:
             bbox = pred.bbox.to_xyxy()
-            x1, y1, x2, y2 = map(int, bbox)
+            # Calculate exact center point of detection
+            center_x = int((bbox[0] + bbox[2]) / 2)
+            center_y = int((bbox[1] + bbox[3]) / 2)
             
-            # Instead of a flat 1, we add "intensity" to the center
-            # This makes the centers of clusters much redder
-            heatmap[y1:y2, x1:x2] += intensity
+            # Draw a 'hot' point. Clusters will overlap and turn red.
+            cv2.circle(heatmap, (center_x, center_y), radius=10, color=255, thickness=-1)
 
-        # 3. Smooth the "heat" into a glow
-        heatmap = cv2.GaussianBlur(heatmap, (blur_radius, blur_radius), 0)
-        
-        # 4. Normalize to 0-255 for the ColorMap
+        # 4. Blur and Colorize
+        heatmap = cv2.GaussianBlur(heatmap, (heat_blur, heat_blur), 0)
         if heatmap.max() > 0:
-            heatmap = np.clip((heatmap / heatmap.max() * 255), 0, 255).astype(np.uint8)
-        else:
-            heatmap = heatmap.astype(np.uint8)
-
-        # 5. Apply "Jet" Colormap (Blue -> Green -> Red)
+            heatmap = (heatmap / heatmap.max() * 255).astype(np.uint8)
+        
         heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
         
-        # 6. Overlay Heatmap on Original Satellite Image
-        # 0.6 opacity for original, 0.4 for heatmap
-        density_map = cv2.addWeighted(img_array, 0.6, heatmap_color, 0.4, 0)
-        density_image = Image.fromarray(density_map)
+        # 5. Blend Heatmap with Satellite Image
+        # 0.7 original, 0.3 heatmap overlay
+        final_overlay = cv2.addWeighted(img_array, 0.7, heatmap_color, 0.3, 0)
+        final_image = Image.fromarray(final_overlay)
 
-    # 7. Comparison Display
-    st.subheader("🔍 Debris Density Comparison")
+    # 6. Interactive Comparison
+    st.subheader("🔍 Localized Hotspot Analysis")
+    st.info(f"Analysis Complete: Processing in {slice_size}px slices.")
+    
     image_comparison(
         img1=image,
-        img2=density_image,
+        img2=final_image,
         label1="Original Satellite",
-        label2="Debris Density (Heatmap)",
-        width=800
+        label2="Debris Hotspots",
+        width=900,
+        starting_position=50
     )
+
+    # 7. Summary
+    st.write(f"**Detected Clusters:** {len(result.object_prediction_list)} points identified.")
