@@ -7,75 +7,82 @@ import numpy as np
 import cv2
 from PIL import Image
 
-st.set_page_config(page_title="Coastal Debris Mapper", layout="wide")
-st.title("🌊 Localized Marine Debris Density Mapper")
-st.markdown("Designed for **Aerial & Coastal** high-res imagery.")
+st.set_page_config(page_title="Aerial Debris Area Mapper", layout="wide")
+st.title("🚁 Local Aerial Debris: Density & Area Analysis")
 
+# 1. Load Model with SAHI Wrapper
 @st.cache_resource
-def load_aerial_model():
+def load_precision_model():
     return AutoDetectionModel.from_pretrained(
         model_type='yolov8',
         model_path='best.pt',
-        confidence_threshold=0.30, # Higher for local views to reduce false positives
+        confidence_threshold=0.25,
         device='cpu'
     )
 
-model = load_aerial_model()
+model = load_precision_model()
 
-# Sidebar Settings for Local Heights
-st.sidebar.header("Altitude Tuning")
-# Slices are larger (640) because debris is bigger at lower altitudes
-slice_size = st.sidebar.select_slider("Detection Detail", options=[640, 800], value=640)
-heat_intensity = st.sidebar.slider("Heat Intensity", 1.0, 15.0, 8.0)
-blur_radius = st.sidebar.slider("Density Spread", 51, 301, 151, step=2)
+# 2. Sidebar Settings
+st.sidebar.header("📏 Scale & Precision")
+# GSD: How many meters does one pixel represent? (Common drone GSD is 0.02 - 0.05m)
+gsd = st.sidebar.number_input("Resolution (meters per pixel)", value=0.03, format="%.4f")
+heat_val = st.sidebar.slider("Heat Intensity", 1.0, 15.0, 5.0)
+blur_val = st.sidebar.slider("Density Spread", 51, 301, 121, step=2)
 
-uploaded_file = st.file_uploader("Upload Drone or Local Aerial Photo", type=["jpg", "jpeg", "png"])
+uploaded_file = st.file_uploader("Upload Drone/Aerial Photo", type=["jpg", "jpeg", "png"])
 
 if uploaded_file:
     image = Image.open(uploaded_file).convert("RGB")
     img_array = np.array(image)
     
-    with st.spinner('Analyzing local debris zones...'):
-        # 1. Sliced Inference optimized for aerial heights
+    with st.spinner('Calculating debris footprint...'):
+        # 3. Sliced Inference for Local Heights (640px slices)
         result = get_sliced_prediction(
             img_array,
             model,
-            slice_height=slice_size,
-            slice_width=slice_size,
-            overlap_height_ratio=0.15,
-            overlap_width_ratio=0.15
+            slice_height=640,
+            slice_width=640,
+            overlap_height_ratio=0.15
         )
         
-        # 2. Advanced Area-Based Heatmap
+        # 4. Math: Area Calculation
+        # Total Real Area = (Sum of Pixel Areas) * GSD^2
+        total_pixel_area = 0
         heatmap = np.zeros(img_array.shape[:2], dtype=np.float32)
         
         for pred in result.object_prediction_list:
             bbox = pred.bbox.to_xyxy()
             x1, y1, x2, y2 = map(int, bbox)
-            # Fills the actual footprint of the debris with 'heat'
-            heatmap[y1:y2, x1:x2] += heat_intensity
+            
+            # Calculate pixel area of this specific item
+            w_px = x2 - x1
+            h_px = y2 - y1
+            total_pixel_area += (w_px * h_px)
+            
+            # Add to heatmap
+            heatmap[y1:y2, x1:x2] += heat_val
 
-        # 3. Apply Professional Thermal Effect
-        heatmap = cv2.GaussianBlur(heatmap, (blur_radius, blur_radius), 0)
+        # Convert to real-world Area (m^2)
+        real_area_m2 = total_pixel_area * (gsd ** 2)
+
+        # 5. Process Heatmap Visuals
+        heatmap = cv2.GaussianBlur(heatmap, (blur_val, blur_val), 0)
         if heatmap.max() > 0:
             heatmap = (heatmap / heatmap.max() * 255).astype(np.uint8)
-        
-        # COLORMAP_JET gives the Red (High) to Blue (Low) transition
         heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
         
-        # 4. Create the Final Overlay
         overlay = cv2.addWeighted(img_array, 0.5, heatmap_color, 0.5, 0)
-        final_heatmap_img = Image.fromarray(overlay)
+        final_img = Image.fromarray(overlay)
 
-    # 5. Centered Comparison Slider
-    st.subheader("🔍 Analysis Output")
+    # 6. Display Results
+    col1, col2 = st.columns(2)
+    col1.metric("Approx. Debris Area", f"{real_area_m2:.2f} m²")
+    col2.metric("Detected Clusters", len(result.object_prediction_list))
+
     image_comparison(
         img1=image,
-        img2=final_heatmap_img,
-        label1="Original Image",
-        label2="Debris Density Map",
-        width=1000,
-        starting_position=50
+        img2=final_img,
+        label1="Raw Photo",
+        label2="Density & Footprint Map",
+        width=1000
     )
-    
-    st.info(f"Mapped {len(result.object_prediction_list)} significant debris concentrations.")
