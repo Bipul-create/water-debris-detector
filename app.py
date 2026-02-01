@@ -2,75 +2,48 @@ import streamlit as st
 from ultralytics import YOLO
 from PIL import Image
 import numpy as np
+import cv2
 
-# 1. Page Configuration
-st.set_page_config(page_title="Marine Debris Detector", layout="wide")
+st.set_page_config(page_title="Marine Debris Hotspot Mapper", layout="wide")
+st.title("🛰️ Satellite Debris Hotspot Detector")
 
-# 2. Title and Description
-st.title("🌊 Ocean Plastic & Debris Detector")
-st.write("Upload an underwater image to identify plastic, glass, and other pollutants.")
-
-# 3. Load the Model
+# Load Model
 @st.cache_resource
 def load_model():
-    # This matches the 'best.pt' file in your folder
-    model = YOLO('best.pt')
-    return model
+    return YOLO('best.pt')
 
-try:
-    model = load_model()
-except Exception as e:
-    st.error(f"Error loading model: {e}. Make sure 'best.pt' is in the same folder.")
+model = load_model()
 
-# 4. Sidebar Settings
-st.sidebar.header("Settings")
-conf_threshold = st.sidebar.slider("Confidence Threshold", 0.0, 1.0, 0.4)
+# Sidebar: Lower threshold helps find smaller debris in satellite images
+conf_threshold = st.sidebar.slider("Sensitivity (Confidence)", 0.05, 1.0, 0.15)
+blur_intensity = st.sidebar.slider("Hotspot Blur", 5, 101, 51, step=2)
 
-# 5. File Uploader
-uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
+uploaded_file = st.file_uploader("Upload Satellite Image", type=["jpg", "png", "jpeg"])
 
-if uploaded_file is not None:
-    # Convert uploaded file to a format PIL/YOLO understands
+if uploaded_file:
     image = Image.open(uploaded_file)
-    
-    # Create two columns for Before/After
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("Original Image")
-        st.image(image, use_container_width=True)
-
-    # 6. Run Inference
-with st.spinner('Generating Hotspot Map...'):
-    results = model.predict(image, conf=conf_threshold)
-    
-    # 1. Start with the original image
     img_array = np.array(image)
-    heatmap = np.zeros(img_array.shape[:2], dtype=np.float32)
-
-    # 2. Add "Heat" for every detection
-    for result in results:
-        for box in result.boxes.xyxy:
+    
+    with st.spinner('Calculating debris density...'):
+        results = model.predict(image, conf=conf_threshold)
+        
+        # Create Heatmap Layer
+        heatmap = np.zeros(img_array.shape[:2], dtype=np.float32)
+        for box in results[0].boxes.xyxy:
             x1, y1, x2, y2 = map(int, box)
-            # Add intensity to the center of the box
-            heatmap[y1:y2, x1:x2] += 1 
+            heatmap[y1:y2, x1:x2] += 1  # Add "heat" to detected areas
 
-    # 3. Blur the heatmap to make it look like a "hotspot"
-    heatmap = cv2.GaussianBlur(heatmap, (51, 51), 0)
-    heatmap = np.clip(heatmap / heatmap.max() * 255, 0, 255).astype(np.uint8) if heatmap.max() > 0 else heatmap.astype(np.uint8)
-    
-    # 4. Apply a color map (Red = Hot, Blue = Cold)
-    heatmap_img = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-    
-    # 5. Overlay the heatmap onto the original image
-    overlay = cv2.addWeighted(img_array, 0.6, heatmap_img, 0.4, 0)
-    st.image(overlay, caption="Debris Hotspot Map", use_container_width=True)
+        # Apply Blur for "Hotspot" effect
+        heatmap = cv2.GaussianBlur(heatmap, (blur_intensity, blur_intensity), 0)
+        if heatmap.max() > 0:
+            heatmap = (heatmap / heatmap.max() * 255).astype(np.uint8)
+        
+        # Color the heatmap (Red=High Density)
+        heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+        
+        # Overlay on original image
+        hotspot_overlay = cv2.addWeighted(img_array, 0.7, heatmap_color, 0.3, 0)
 
-
-    # 7. Results Summary
-    st.success("Analysis Complete!")
-    boxes = results[0].boxes
-    if len(boxes) > 0:
-        st.write(f"Detected **{len(boxes)}** items of debris.")
-    else:
-        st.info("No debris detected with current confidence level.")
+    col1, col2 = st.columns(2)
+    col1.image(image, caption="Original Satellite View")
+    col2.image(hotspot_overlay, caption="Debris Hotspots")
