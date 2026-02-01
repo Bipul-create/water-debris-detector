@@ -1,8 +1,10 @@
 ultralytics
 streamlit
+streamlit-image-comparison
 opencv-python-headless
 sahi
 pillow
 numpy
+
 
 
