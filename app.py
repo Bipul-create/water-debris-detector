@@ -41,18 +41,31 @@ if uploaded_file is not None:
         st.image(image, use_container_width=True)
 
     # 6. Run Inference
-    with st.spinner('Analyzing debris...'):
-        results = model.predict(image, conf=conf_threshold)
-        
-        # Plot the results on the image
-        res_plotted = results[0].plot()
-        
-        # Convert BGR (OpenCV) to RGB (Streamlit/PIL)
-        res_image = Image.fromarray(res_plotted[:, :, ::-1])
+with st.spinner('Generating Hotspot Map...'):
+    results = model.predict(image, conf=conf_threshold)
+    
+    # 1. Start with the original image
+    img_array = np.array(image)
+    heatmap = np.zeros(img_array.shape[:2], dtype=np.float32)
 
-    with col2:
-        st.subheader("Detected Debris")
-        st.image(res_image, use_container_width=True)
+    # 2. Add "Heat" for every detection
+    for result in results:
+        for box in result.boxes.xyxy:
+            x1, y1, x2, y2 = map(int, box)
+            # Add intensity to the center of the box
+            heatmap[y1:y2, x1:x2] += 1 
+
+    # 3. Blur the heatmap to make it look like a "hotspot"
+    heatmap = cv2.GaussianBlur(heatmap, (51, 51), 0)
+    heatmap = np.clip(heatmap / heatmap.max() * 255, 0, 255).astype(np.uint8) if heatmap.max() > 0 else heatmap.astype(np.uint8)
+    
+    # 4. Apply a color map (Red = Hot, Blue = Cold)
+    heatmap_img = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+    
+    # 5. Overlay the heatmap onto the original image
+    overlay = cv2.addWeighted(img_array, 0.6, heatmap_img, 0.4, 0)
+    st.image(overlay, caption="Debris Hotspot Map", use_container_width=True)
+
 
     # 7. Results Summary
     st.success("Analysis Complete!")
